@@ -1,0 +1,11 @@
+.git
+.gitignore
+plan.md
+README.md
+LICENSE
+*.md
+web
+data
+CREDENTIALS.txt
+.env
+.env.*

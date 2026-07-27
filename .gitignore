@@ -27,8 +27,16 @@ go.work.sum
 # env file
 .env
 
+# generated setup artifacts
+CREDENTIALS.txt
+data/
+
+# node / frontend build output
+web/node_modules/
+web/dist/
+
 Editor/IDE
 .idea/
 .vscode/
 
-family-backup-app-plan.md
+plan.md
