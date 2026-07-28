@@ -16,22 +16,22 @@ import (
 )
 
 type config struct {
-	Port           string
-	DatabaseURL    string
-	MinioEndpoint  string
-	MinioAccessKey string
-	MinioSecretKey string
-	JWTSecret      string
+	Port               string
+	DatabaseURL        string
+	SeaweedfsEndpoint  string
+	SeaweedfsAccessKey string
+	SeaweedfsSecretKey string
+	JWTSecret          string
 }
 
 func loadConfig() config {
 	return config{
-		Port:           getEnv("PORT", "8080"),
-		DatabaseURL:    getEnv("DATABASE_URL", ""),
-		MinioEndpoint:  getEnv("MINIO_ENDPOINT", ""),
-		MinioAccessKey: getEnv("MINIO_ACCESS_KEY", ""),
-		MinioSecretKey: getEnv("MINIO_SECRET_KEY", ""),
-		JWTSecret:      getEnv("JWT_SECRET", ""),
+		Port:               getEnv("PORT", "8080"),
+		DatabaseURL:        getEnv("DATABASE_URL", ""),
+		SeaweedfsEndpoint:  getEnv("SEAWEEDFS_S3_ENDPOINT", ""),
+		SeaweedfsAccessKey: getEnv("SEAWEEDFS_ACCESS_KEY", ""),
+		SeaweedfsSecretKey: getEnv("SEAWEEDFS_SECRET_KEY", ""),
+		JWTSecret:          getEnv("JWT_SECRET", ""),
 	}
 }
 
@@ -48,8 +48,8 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", healthHandler)
 
-	log.Printf("OAADrive API listening on :%s (db configured: %v, minio configured: %v)",
-		cfg.Port, cfg.DatabaseURL != "", cfg.MinioEndpoint != "")
+	log.Printf("OAADrive API listening on :%s (db configured: %v, seaweedfs configured: %v)",
+		cfg.Port, cfg.DatabaseURL != "", cfg.SeaweedfsEndpoint != "")
 
 	server := &http.Server{
 		Addr:         ":" + cfg.Port,

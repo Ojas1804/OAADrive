@@ -6,4 +6,4 @@ One Above All Drive or OAADrive for converting your old laptop into self-hosted 
 - Go
 - Postgres
 - React
-- Minio
+- SeaweedFS

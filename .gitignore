@@ -27,6 +27,9 @@ go.work.sum
 # env file
 .env
 
+# SeaweedFS S3 auth config (contains real access/secret keys)
+seaweedfs-s3.json
+
 # generated setup artifacts
 CREDENTIALS.txt
 data/

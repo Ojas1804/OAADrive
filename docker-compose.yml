@@ -1,29 +1,34 @@
 version: "3.9"
 
 services:
-  minio:
-    image: minio/minio:latest
-    container_name: minio
+  seaweedfs:
+    image: chrislusf/seaweedfs:latest
+    container_name: seaweedfs
     restart: always
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    command: >
+      server -dir=/data -s3
+      -s3.port=8333
+      -s3.config=/etc/seaweedfs/s3.json
+      -master.port=9333
+      -volume.port=8080
+      -filer.port=8888
     volumes:
-      - ${MINIO_DATA_PATH}:/data
+      - ${SEAWEEDFS_DATA_PATH}:/data
+      - ./seaweedfs-s3.json:/etc/seaweedfs/s3.json:ro
     ports:
       # Comment these out once your Go API is the only thing that needs to
-      # reach MinIO (Phase 5 hardening). Keep them during initial setup so
-      # you can log into the MinIO console from your browser.
-      - "9000:9000"   # S3 API
-      - "9001:9001"   # Web console
+      # reach SeaweedFS (Phase 5 hardening). Keep them during initial setup
+      # so you can browse the filer UI / master status from your browser.
+      - "8333:8333"   # S3 API
+      - "9333:9333"   # Master (cluster status)
+      - "8888:8888"   # Filer (web UI / browsing)
     networks:
       - backend
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test: ["CMD", "wget", "-qO-", "http://localhost:9333/cluster/status"]
       interval: 30s
       timeout: 5s
-      retries: 3
+      retries: 5
 
   postgres:
     image: postgres:16
@@ -58,14 +63,14 @@ services:
     environment:
       PORT: "8080"
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
-      MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
-      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      SEAWEEDFS_S3_ENDPOINT: seaweedfs:8333
+      SEAWEEDFS_ACCESS_KEY: ${SEAWEEDFS_ACCESS_KEY}
+      SEAWEEDFS_SECRET_KEY: ${SEAWEEDFS_SECRET_KEY}
       JWT_SECRET: ${JWT_SECRET}
     depends_on:
       postgres:
         condition: service_healthy
-      minio:
+      seaweedfs:
         condition: service_healthy
     ports:
       # Exposed for local development/testing. In Phase 5, put this

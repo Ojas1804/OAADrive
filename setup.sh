@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # One-shot installer for the OAADrive home server stack
-# (MinIO + Postgres + Go API + React web), built from this repo.
+# (SeaweedFS + Postgres + Go API + React web), built from this repo.
 #
 # Usage: sudo ./setup.sh
 # Run this from inside your clone of the OAADrive repo (the directory
@@ -9,18 +9,18 @@
 #
 # What it does, with no manual steps required afterward:
 #   1. Checks for Docker (and offers to install it if missing)
-#   2. Creates data directories for MinIO and Postgres on the configured disk
-#   3. Generates a .env file with strong random credentials (idempotent)
+#   2. Creates data directories for SeaweedFS and Postgres on the configured disk
+#   3. Generates a .env file and seaweedfs-s3.json with strong random credentials (idempotent)
 #   4. Builds the api/web images and starts the full stack
-#   5. Waits until minio/postgres/api report healthy
-#   6. Creates the MinIO buckets (photos, backups, documents)
+#   5. Waits until seaweedfs/postgres/api report healthy
+#   6. Creates the SeaweedFS buckets (photos, backups, documents)
 #   7. Installs a systemd service so everything survives a reboot
 #   8. Prints a summary with URLs and generated credentials
 
 set -euo pipefail
 
 # ---------- Config ----------
-# Where MinIO/Postgres persist data. Point this at your external disk.
+# Where SeaweedFS/Postgres persist data. Point this at your external disk.
 DATA_DIR="${DATA_DIR:-/opt/homeserver/data}"
 # -----------------------------------------------------------------------------
 
@@ -36,7 +36,7 @@ if [[ $EUID -ne 0 ]]; then
   die "Please run this with sudo: sudo ./setup.sh"
 fi
 
-for required in docker-compose.yml Dockerfile web/Dockerfile init.sql; do
+for required in docker-compose.yml Dockerfile web/Dockerfile init.sql seaweedfs-s3.example.json; do
   [[ -f "${REPO_DIR}/${required}" ]] || die "Expected ${required} in ${REPO_DIR}. Run this script from inside the cloned repo."
 done
 
@@ -56,7 +56,7 @@ fi
 
 # ---------- 2. Create data directories ----------
 log "Creating data directories under $DATA_DIR"
-mkdir -p "$DATA_DIR/minio-data" "$DATA_DIR/postgres-data"
+mkdir -p "$DATA_DIR/seaweedfs-data" "$DATA_DIR/postgres-data"
 chown -R "$REAL_USER":"$REAL_USER" "$DATA_DIR"
 
 cd "$REPO_DIR"
@@ -64,17 +64,17 @@ cd "$REPO_DIR"
 # ---------- 3. Generate credentials (only if not already set up) ----------
 if [[ ! -f .env ]]; then
   log "Generating secure random credentials..."
-  MINIO_ROOT_USER="admin"
-  MINIO_ROOT_PASSWORD="$(openssl rand -base64 24 | tr -d '/+=' | cut -c1-24)"
+  SEAWEEDFS_ACCESS_KEY="$(openssl rand -hex 10)"
+  SEAWEEDFS_SECRET_KEY="$(openssl rand -base64 32 | tr -d '/+=' | cut -c1-32)"
   POSTGRES_USER="homeserver"
   POSTGRES_PASSWORD="$(openssl rand -base64 24 | tr -d '/+=' | cut -c1-24)"
   POSTGRES_DB="homeserver"
   JWT_SECRET="$(openssl rand -base64 48 | tr -d '/+=' | cut -c1-48)"
 
   cat > .env <<EOF
-MINIO_ROOT_USER=${MINIO_ROOT_USER}
-MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
-MINIO_DATA_PATH=${DATA_DIR}/minio-data
+SEAWEEDFS_ACCESS_KEY=${SEAWEEDFS_ACCESS_KEY}
+SEAWEEDFS_SECRET_KEY=${SEAWEEDFS_SECRET_KEY}
+SEAWEEDFS_DATA_PATH=${DATA_DIR}/seaweedfs-data
 
 POSTGRES_USER=${POSTGRES_USER}
 POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
@@ -94,6 +94,31 @@ fi
 # shellcheck disable=SC1091
 source .env
 
+# ---------- 3b. Generate seaweedfs-s3.json (S3 auth identity) ----------
+if [[ ! -f seaweedfs-s3.json ]]; then
+  log "Writing seaweedfs-s3.json with generated access/secret key..."
+  cat > seaweedfs-s3.json <<EOF
+{
+  "identities": [
+    {
+      "name": "admin",
+      "credentials": [
+        {
+          "accessKey": "${SEAWEEDFS_ACCESS_KEY}",
+          "secretKey": "${SEAWEEDFS_SECRET_KEY}"
+        }
+      ],
+      "actions": ["Admin", "Read", "Write"]
+    }
+  ]
+}
+EOF
+  chmod 600 seaweedfs-s3.json
+  chown "$REAL_USER":"$REAL_USER" seaweedfs-s3.json
+else
+  log "seaweedfs-s3.json already exists — reusing existing config (idempotent run)."
+fi
+
 # ---------- 4. Build and start the stack ----------
 log "Building images (api, web)..."
 docker compose build
@@ -102,12 +127,12 @@ log "Starting Docker Compose stack..."
 docker compose up -d
 
 # ---------- 5. Wait for health ----------
-log "Waiting for minio, postgres, and api to become healthy..."
+log "Waiting for seaweedfs, postgres, and api to become healthy..."
 for i in $(seq 1 30); do
-  MINIO_STATUS=$(docker inspect --format='{{.State.Health.Status}}' minio 2>/dev/null || echo "starting")
+  SEAWEEDFS_STATUS=$(docker inspect --format='{{.State.Health.Status}}' seaweedfs 2>/dev/null || echo "starting")
   PG_STATUS=$(docker inspect --format='{{.State.Health.Status}}' postgres 2>/dev/null || echo "starting")
   API_STATUS=$(docker inspect --format='{{.State.Health.Status}}' api 2>/dev/null || echo "starting")
-  if [[ "$MINIO_STATUS" == "healthy" && "$PG_STATUS" == "healthy" && "$API_STATUS" == "healthy" ]]; then
+  if [[ "$SEAWEEDFS_STATUS" == "healthy" && "$PG_STATUS" == "healthy" && "$API_STATUS" == "healthy" ]]; then
     log "All services are healthy."
     break
   fi
@@ -117,10 +142,12 @@ for i in $(seq 1 30); do
   fi
 done
 
-# ---------- 6. Create MinIO buckets ----------
-log "Creating MinIO buckets (photos, backups, documents)..."
+# ---------- 6. Create SeaweedFS buckets ----------
+# mc is a generic S3-compatible client, so it works against SeaweedFS's
+# S3 gateway just as well as it does against MinIO.
+log "Creating SeaweedFS buckets (photos, backups, documents)..."
 docker run --rm --network host \
-  -e "MC_HOST_local=http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@localhost:9000" \
+  -e "MC_HOST_local=http://${SEAWEEDFS_ACCESS_KEY}:${SEAWEEDFS_SECRET_KEY}@localhost:8333" \
   minio/mc mb --ignore-existing local/photos local/backups local/documents
 
 # ---------- 7. Install systemd service for auto-start on boot ----------
@@ -155,11 +182,12 @@ cat > "$CREDS_FILE" <<EOF
 OAADrive Home Server — generated credentials
 Keep this file safe and delete it once you've saved the values elsewhere.
 
-Web app:        http://${LAPTOP_IP}:${WEB_PORT}
-API:            http://${LAPTOP_IP}:${API_PORT}
-MinIO Console:  http://${LAPTOP_IP}:9001
-MinIO User:     ${MINIO_ROOT_USER}
-MinIO Password: ${MINIO_ROOT_PASSWORD}
+Web app:              http://${LAPTOP_IP}:${WEB_PORT}
+API:                  http://${LAPTOP_IP}:${API_PORT}
+SeaweedFS Filer UI:   http://${LAPTOP_IP}:8888
+SeaweedFS Master UI:  http://${LAPTOP_IP}:9333
+SeaweedFS Access Key: ${SEAWEEDFS_ACCESS_KEY}
+SeaweedFS Secret Key: ${SEAWEEDFS_SECRET_KEY}
 
 Postgres DB:       ${POSTGRES_DB}
 Postgres User:     ${POSTGRES_USER}
@@ -172,8 +200,8 @@ chown "$REAL_USER":"$REAL_USER" "$CREDS_FILE"
 
 echo
 log "Setup complete! ✅"
-echo "  Web app:       http://${LAPTOP_IP}:${WEB_PORT}"
-echo "  API:           http://${LAPTOP_IP}:${API_PORT}/healthz"
-echo "  MinIO console: http://${LAPTOP_IP}:9001"
+echo "  Web app:            http://${LAPTOP_IP}:${WEB_PORT}"
+echo "  API:                http://${LAPTOP_IP}:${API_PORT}/healthz"
+echo "  SeaweedFS filer UI: http://${LAPTOP_IP}:8888"
 echo "  Credentials saved to: ${CREDS_FILE}"
 echo "  The stack will now auto-start on every boot via systemd (homeserver.service)."
