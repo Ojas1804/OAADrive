@@ -5,10 +5,13 @@ WORKDIR /src
 
 COPY go.mod ./
 COPY go.sum* ./
-RUN go mod download
-
 COPY cmd ./cmd
 COPY internal ./internal
+
+# No go.sum is committed yet (dependencies were added without network
+# access to the dev machine), so resolve and verify them here instead of
+# `go mod download`, which requires an existing go.sum.
+RUN go mod tidy
 
 RUN CGO_ENABLED=0 GOOS=linux go build -o /out/server ./cmd/server
 

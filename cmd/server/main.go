@@ -1,37 +1,39 @@
-// Package main is the entrypoint for the OAADrive API server.
-//
-// This is currently a minimal placeholder: it exposes a health-check
-// endpoint and logs the configuration it was started with, so the
-// Docker/Compose stack has a real service to build and run against
-// while the actual API (auth, uploads, files, admin) is implemented
-// in internal/api, internal/auth, internal/db, and internal/storage.
+// Package main is the entrypoint for the OAADrive API server. It loads
+// config from the environment, connects to Postgres and SeaweedFS, and
+// serves the REST API defined in internal/api (see docs/API_CONTRACT.md).
 package main
 
 import (
-	"encoding/json"
+	"context"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
+
+	"github.com/Ojas1804/OAADrive/internal/api"
+	"github.com/Ojas1804/OAADrive/internal/db"
+	"github.com/Ojas1804/OAADrive/internal/storage"
 )
 
 type config struct {
-	Port string
-	DatabaseURL string
-	SeaweedfsEndpoint string
+	Port               string
+	DatabaseURL        string
+	SeaweedfsEndpoint  string
 	SeaweedfsAccessKey string
 	SeaweedfsSecretKey string
-	JWTSecret string
+	JWTSecret          string
 }
 
 func loadConfig() config {
 	return config{
-		Port: getEnv("PORT", "8080"),
-		DatabaseURL: getEnv("DATABASE_URL", ""),
-		SeaweedfsEndpoint: getEnv("SEAWEEDFS_S3_ENDPOINT", ""),
+		Port:               getEnv("PORT", "8080"),
+		DatabaseURL:        getEnv("DATABASE_URL", ""),
+		SeaweedfsEndpoint:  getEnv("SEAWEEDFS_S3_ENDPOINT", ""),
 		SeaweedfsAccessKey: getEnv("SEAWEEDFS_ACCESS_KEY", ""),
 		SeaweedfsSecretKey: getEnv("SEAWEEDFS_SECRET_KEY", ""),
-		JWTSecret: getEnv("JWT_SECRET", ""),
+		JWTSecret:          getEnv("JWT_SECRET", ""),
 	}
 }
 
@@ -44,30 +46,55 @@ func getEnv(key, fallback string) string {
 
 func main() {
 	cfg := loadConfig()
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", healthHandler)
-
-	log.Printf("OAADrive API listening on :%s (db configured: %v, seaweedfs configured: %v)",
-		cfg.Port, cfg.DatabaseURL != "", cfg.SeaweedfsEndpoint != "")
-
-	server := &http.Server{
-		Addr: ":" + cfg.Port,
-		Handler: mux,
-		ReadTimeout: 10 * time.Second,
-		WriteTimeout: 10 * time.Second,
+	if cfg.DatabaseURL == "" {
+		log.Fatal("DATABASE_URL is required")
+	}
+	if cfg.JWTSecret == "" {
+		log.Fatal("JWT_SECRET is required")
 	}
 
-	if err := server.ListenAndServe(); err != nil {
-		log.Fatalf("server error: %v", err)
-	}
-}
+	connectCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-func healthHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]string{
-		"status": "ok",
-		"time": time.Now().UTC().Format(time.RFC3339),
-	})
+	pool, err := db.Connect(connectCtx, cfg.DatabaseURL)
+	if err != nil {
+		log.Fatalf("database connection failed: %v", err)
+	}
+	defer pool.Close()
+
+	storageClient, err := storage.NewClient(cfg.SeaweedfsEndpoint, cfg.SeaweedfsAccessKey, cfg.SeaweedfsSecretKey)
+	if err != nil {
+		log.Fatalf("storage client init failed: %v", err)
+	}
+
+	server := api.NewServer(
+		db.NewUserStore(pool),
+		db.NewFileStore(pool),
+		db.NewAuditStore(pool),
+		storageClient,
+		cfg.JWTSecret,
+	)
+
+	httpServer := &http.Server{
+		Addr:         ":" + cfg.Port,
+		Handler:      server.Routes(),
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
+	}
+
+	go func() {
+		log.Printf("OAADrive API listening on :%s", cfg.Port)
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server error: %v", err)
+		}
+	}()
+
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	<-stop
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+	_ = httpServer.Shutdown(shutdownCtx)
+	log.Println("server stopped")
 }
