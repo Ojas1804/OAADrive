@@ -41,6 +41,7 @@ web/dist/
 Editor/IDE
 .idea/
 .vscode/
+.github/
 
 plan.md
 bash.exe.stackdump
