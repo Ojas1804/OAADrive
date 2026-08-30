@@ -1,102 +1,32 @@
-version: "3.9"
-
+version: "3.8"
 services:
-  seaweedfs:
-    image: chrislusf/seaweedfs:latest
-    container_name: seaweedfs
-    restart: always
-    command: >
-      server -dir=/data -s3
-      -s3.port=8333
-      -s3.config=/etc/seaweedfs/s3.json
-      -master.port=9333
-      -volume.port=8080
-      -filer.port=8888
-    volumes:
-      - ${SEAWEEDFS_DATA_PATH}:/data
-      - ./seaweedfs-s3.json:/etc/seaweedfs/s3.json:ro
+  master:
+    image: chrislusf/seaweedfs
     ports:
-      # Comment these out once your Go API is the only thing that needs to
-      # reach SeaweedFS (Phase 5 hardening). Keep them during initial setup
-      # so you can browse the filer UI / master status from your browser.
-      - "8333:8333"   # S3 API
-      - "9333:9333"   # Master (cluster status)
-      - "8888:8888"   # Filer (web UI / browsing)
-    networks:
-      - backend
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:9333/cluster/status"]
-      interval: 30s
-      timeout: 5s
-      retries: 5
+      - "9333:9333"
+    command: "master -ip=master -ip.bind=0.0.0.0"
 
-  postgres:
-    image: postgres:16
-    container_name: postgres
-    restart: always
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
-    volumes:
-      - ${POSTGRES_DATA_PATH}:/var/lib/postgresql/data
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+  volume:
+    image: chrislusf/seaweedfs
     ports:
-      # Only for local admin access via psql during setup. Remove/limit
-      # this in Phase 5 — Postgres should not be reachable from outside
-      # the Docker network in the finished system.
-      - "5432:5432"
-    networks:
-      - backend
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  api:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: api
-    restart: always
-    environment:
-      PORT: "8080"
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
-      SEAWEEDFS_S3_ENDPOINT: seaweedfs:8333
-      SEAWEEDFS_ACCESS_KEY: ${SEAWEEDFS_ACCESS_KEY}
-      SEAWEEDFS_SECRET_KEY: ${SEAWEEDFS_SECRET_KEY}
-      JWT_SECRET: ${JWT_SECRET}
+      - "8080:8080"
+    command: 'volume -mserver="master:9333" -ip.bind=0.0.0.0 -port=8080'
     depends_on:
-      postgres:
-        condition: service_healthy
-      seaweedfs:
-        condition: service_healthy
-    ports:
-      # Exposed for local development/testing. In Phase 5, put this
-      # behind the reverse proxy instead of publishing it directly.
-      - "${API_PORT:-8080}:8080"
-    networks:
-      - backend
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      - master
 
-  web:
-    build:
-      context: ./web
-      dockerfile: Dockerfile
-    container_name: web
-    restart: always
+  filer:
+    image: chrislusf/seaweedfs
+    ports:
+      - "8888:8888"
+    command: 'filer -master="master:9333" -ip.bind=0.0.0.0'
     depends_on:
-      - api
-    ports:
-      - "${WEB_PORT:-3000}:80"
-    networks:
-      - backend
+      - master
+      - volume
 
-networks:
-  backend:
-    driver: bridge
+  s3:
+    image: chrislusf/seaweedfs
+    ports:
+      - "8333:8333"
+    command: 's3 -filer="filer:8888"'
+    depends_on:
+      - filer

@@ -4,11 +4,13 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -16,6 +18,35 @@ import (
 	"github.com/Ojas1804/OAADrive/internal/db"
 	"github.com/Ojas1804/OAADrive/internal/storage"
 )
+
+// loadDotEnv populates the process environment from a .env file, if present.
+// Existing environment variables always take precedence. This only matters
+// when running the server directly (e.g. `go run ./cmd/server`); Docker
+// Compose injects environment variables itself and never needs this.
+func loadDotEnv(path string) {
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if _, exists := os.LookupEnv(key); !exists {
+			os.Setenv(key, value)
+		}
+	}
+}
 
 type config struct {
 	Port               string
